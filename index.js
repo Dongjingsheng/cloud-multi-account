@@ -7,7 +7,7 @@
 
   var PLUGIN_ID = "cloud-multi-account";
   var ROUTE_ID = PLUGIN_ID + ".settings";
-  var PLUGIN_VERSION = "1.7.7"; // 与 plugin.json 同步；打包/升级时记得一起改
+  var PLUGIN_VERSION = "1.7.8"; // 与 plugin.json 同步；打包/升级时记得一起改
   // 桥地址：本机面板（Desktop/WebView hostname=127.0.0.1/localhost）与云端实例面板（hostname=实例域名）统一动态取
   var BRIDGE_HOST = "127.0.0.1";
   try {

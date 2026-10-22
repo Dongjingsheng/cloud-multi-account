@@ -775,6 +775,12 @@ func (b *Bridge) proxy(w http.ResponseWriter, r *http.Request) {
 		target += "?" + stripCloudPrefixQuery(r.URL.RawQuery)
 	}
 
+	// 实时聊天是流式（HTTP/2 stream）：必须边收边发，不能 io.ReadAll 缓冲（否则前端拿不到实时片段、一直转圈）
+	if r.Method == http.MethodPost && (strings.HasPrefix(targetPath, "/api/console/chat") || strings.Contains(targetPath, "/stream")) {
+		b.proxyStream(w, r, target, reqBody, true)
+		return
+	}
+
 	start := time.Now()
 	status, respHeader, respBody, err := b.forward(r.Context(), r.Method, target, reqBody, r.Header, true, 0)
 	dur := time.Since(start).Milliseconds()
@@ -807,6 +813,79 @@ func (b *Bridge) proxy(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(status)
 	if len(respBody) > 0 {
 		w.Write(respBody)
+	}
+}
+
+// proxyStream 流式转发（边收边发）：用于 /api/console/chat 实时聊天等 HTTP/2 stream/SSE 端点。
+// 与 forward 不同：不用 io.ReadAll 等全量，读一块写一块 + Flush，前端能实时收到文字。
+func (b *Bridge) proxyStream(w http.ResponseWriter, r *http.Request, target string, body []byte, allowRetry bool) {
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, target, bytes.NewReader(body))
+	if err != nil {
+		http.Error(w, "stream request error: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	for k, vs := range r.Header {
+		if isHopHeader(k) || strings.EqualFold(k, "Host") {
+			continue
+		}
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
+	if v := req.Header.Get("X-Agent-Id"); v != "" {
+		req.Header.Set("X-Agent-Id", stripCloudPrefix(v))
+	}
+	req.Header.Del("Origin")
+	req.Header.Del("Referer")
+	req.Header.Set("Authorization", "Bearer "+b.accessToken())
+
+	resp, err := b.client.Do(req)
+	if err != nil {
+		log.Printf("[proxy] STREAM %s -> ERR: %v", target, err)
+		http.Error(w, "upstream stream error: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	// 401/403 → 刷新 token 后重试一次（流式重放）
+	if (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) && allowRetry {
+		resp.Body.Close()
+		if rerr := b.refreshToken(); rerr == nil {
+			b.proxyStream(w, r, target, body, false)
+			return
+		}
+		http.Error(w, "unauthorized", resp.StatusCode)
+		return
+	}
+
+	for _, h := range hopHeaders {
+		resp.Header.Del(h)
+	}
+	resp.Header.Del("Content-Length")
+	for k, vs := range resp.Header {
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	log.Printf("[proxy] STREAM %s -> %d (streaming)", target, resp.StatusCode)
+
+	// 边收边发：读一块写一块 + Flush（前端实时看到生成文字）
+	flusher, _ := w.(http.Flusher)
+	buf := make([]byte, 32*1024)
+	for {
+		n, rerr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return // 客户端断开
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if rerr != nil {
+			return
+		}
 	}
 }
 
