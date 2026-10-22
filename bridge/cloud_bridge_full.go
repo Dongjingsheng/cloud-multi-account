@@ -406,6 +406,9 @@ func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/__import/login":
 		b.handleImportLogin(w, r)
 		return
+	case "/__import/remove":
+		b.handleImportRemove(w, r)
+		return
 	case "/__panel":
 		b.handlePanel(w, r)
 		return
@@ -612,6 +615,51 @@ func (b *Bridge) probeAppID(accessToken string) string {
 		log.Printf("[import] app/list no app_id found: %s", truncate(string(body), 200))
 	}
 	return id
+}
+
+// handleImportRemove 删除一个账号（删除 data/ 下对应 oauth 文件；删除主账号后自动重载/fallback）。
+func (b *Bridge) handleImportRemove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, map[string]interface{}{"ok": false, "error": "POST only"})
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, map[string]interface{}{"ok": false, "error": "bad json: " + err.Error()})
+		return
+	}
+	if req.Name == "" {
+		writeJSON(w, map[string]interface{}{"ok": false, "error": "name required"})
+		return
+	}
+	// 兼容输入：cloud_oauth_xxx.json / cloud_oauth_xxx / xxx.json / xxx
+	base := req.Name
+	if !strings.HasPrefix(base, "cloud_oauth_") {
+		base = "cloud_oauth_" + base
+	}
+	if !strings.HasSuffix(base, ".json") {
+		base = base + ".json"
+	}
+	// 安全：拒绝路径穿越
+	if strings.ContainsAny(base, `/\`) {
+		writeJSON(w, map[string]interface{}{"ok": false, "error": "bad name"})
+		return
+	}
+	fp := filepath.Join(b.oauthDir, base)
+	if err := os.Remove(fp); err != nil {
+		if os.IsNotExist(err) {
+			writeJSON(w, map[string]interface{}{"ok": false, "error": "account not found: " + base})
+		} else {
+			writeJSON(w, map[string]interface{}{"ok": false, "error": "remove failed: " + err.Error()})
+		}
+		return
+	}
+	log.Printf("[import] removed oauth %s", fp)
+	// 删除主 oauth 后重新加载（loadOAuth 会自动 fallback 到其他有实例账号）
+	b.loadOAuth()
+	writeJSON(w, map[string]interface{}{"ok": true, "message": "已删除 " + base, "oauth_file": base})
 }
 
 // handlePanel 返回内联 HTML 账号管理面板。
