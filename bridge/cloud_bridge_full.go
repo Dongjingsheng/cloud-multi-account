@@ -208,6 +208,7 @@ func (b *Bridge) loadOAuth() {
 		b.oauth = nil
 		b.baseURL = ""
 		b.oauthErr = fmt.Sprintf("oauth file not readable: %v", err)
+		b.fallbackOAuthLocked() // 主 oauth 文件不存在 → 尝试切到 oauthDir 里其他有实例账号
 		return
 	}
 	var m map[string]interface{}
@@ -215,51 +216,59 @@ func (b *Bridge) loadOAuth() {
 		b.oauth = nil
 		b.baseURL = ""
 		b.oauthErr = fmt.Sprintf("oauth parse error: %v", err)
+		b.fallbackOAuthLocked() // 解析失败 → 同样 fallback
 		return
 	}
 	b.oauth = m
 	appID, _ := firstString(m, "app_id", "appId")
 	if appID == "" {
-		// 主 oauth 无实例（app_id 空，如空实例账号排在文件名前面）：
-		// 自动 fallback 到 oauthDir 中第一个有 app_id 的账号，避免代理转发到空 base_url
-		if b.oauthDir != "" {
-			entries, err := os.ReadDir(b.oauthDir)
-			if err == nil {
-				for _, e := range entries {
-					if e.IsDir() || !strings.HasPrefix(e.Name(), "cloud_oauth") || !strings.HasSuffix(e.Name(), ".json") {
-						continue
-					}
-					fp := filepath.Join(b.oauthDir, e.Name())
-					if fp == b.oauthPath {
-						continue
-					}
-					d2, err2 := os.ReadFile(fp)
-					if err2 != nil {
-						continue
-					}
-					var m2 map[string]interface{}
-					if json.Unmarshal(d2, &m2) != nil {
-						continue
-					}
-					a2, _ := firstString(m2, "app_id", "appId")
-					if a2 == "" {
-						continue
-					}
-					b.oauthPath = fp
-					b.oauth = m2
-					b.baseURL = "https://" + a2 + baseHostSuffix
-					b.oauthErr = ""
-					log.Printf("[auth] main oauth 无 app_id -> fallback 到 %s（base=%s）", filepath.Base(fp), b.baseURL)
-					return
-				}
-			}
-		}
-		b.baseURL = ""
 		b.oauthErr = "oauth file missing app_id"
+		b.fallbackOAuthLocked() // 主 oauth 无实例（app_id 空）→ fallback 到有实例账号
 		return
 	}
 	b.baseURL = "https://" + appID + baseHostSuffix
 	b.oauthErr = ""
+}
+
+// fallbackOAuthLocked 主 oauth 不可用（文件不存在/解析失败/缺 app_id）时，
+// 从 oauthDir 中找第一个有 app_id 的账号作为主账号，避免代理转发到空 base_url。
+// 调用方必须持有 b.mu。
+func (b *Bridge) fallbackOAuthLocked() {
+	if b.oauthDir == "" {
+		return
+	}
+	entries, err := os.ReadDir(b.oauthDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), "cloud_oauth") || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		fp := filepath.Join(b.oauthDir, e.Name())
+		if fp == b.oauthPath {
+			continue
+		}
+		d2, err2 := os.ReadFile(fp)
+		if err2 != nil {
+			continue
+		}
+		var m2 map[string]interface{}
+		if json.Unmarshal(d2, &m2) != nil {
+			continue
+		}
+		a2, _ := firstString(m2, "app_id", "appId")
+		if a2 == "" {
+			continue
+		}
+		b.oauthPath = fp
+		b.oauth = m2
+		b.baseURL = "https://" + a2 + baseHostSuffix
+		b.oauthErr = ""
+		log.Printf("[auth] 主 oauth 不可用 -> fallback 到 %s（base=%s）", filepath.Base(fp), b.baseURL)
+		return
+	}
+	b.baseURL = ""
 }
 
 func (b *Bridge) accessToken() string {
