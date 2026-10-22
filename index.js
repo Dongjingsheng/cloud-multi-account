@@ -7,7 +7,15 @@
 
   var PLUGIN_ID = "cloud-multi-account";
   var ROUTE_ID = PLUGIN_ID + ".settings";
-  var BRIDGE = "http://127.0.0.1:59000";
+  // 桥地址：本机面板（Desktop/WebView hostname=127.0.0.1/localhost）与云端实例面板（hostname=实例域名）统一动态取
+  var BRIDGE_HOST = "127.0.0.1";
+  try {
+    var hn = (location && location.hostname) || "";
+    if (hn && hn !== "0.0.0.0" && hn !== "::" && hn !== "::1" && hn !== "[" && hn !== "localhost" && hn.indexOf("[") !== 0) {
+      BRIDGE_HOST = hn;
+    }
+  } catch (e) {}
+  var BRIDGE = "http://" + BRIDGE_HOST + ":59000";
   var CREDS_KEY = "cloudMaCredsList";
   var refreshTimer = null;
   var TOKEN_FULL_MIN = 120; // access_token 全量有效期（分钟），用于进度条

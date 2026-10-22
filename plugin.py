@@ -16,6 +16,8 @@ LOGS_DIR = os.path.join(TOOLS, 'logs')
 DATA_DIR = os.path.join(TOOLS, 'data')
 LOG_FILE = os.path.join(LOGS_DIR, 'cloud_bridge.log')
 PORT = 59000
+# 桥监听地址：0.0.0.0 = 本机 + 远程都可访问（云端实例经域名访问面板时需要）；可用环境变量覆盖
+LISTEN = os.environ.get('CLOUD_BRIDGE_LISTEN', f'0.0.0.0:{PORT}')
 
 
 def _ensure_dirs():
@@ -112,7 +114,7 @@ def _start_bridge():
                     break
     except Exception:
         pass
-    args = [exe, '--listen', f'127.0.0.1:{PORT}', '--oauth-dir', oauth_dir]
+    args = [exe, '--listen', LISTEN, '--oauth-dir', oauth_dir]
     if oauth_file:
         args += ['--oauth', oauth_file]
     try:
