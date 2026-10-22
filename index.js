@@ -452,15 +452,15 @@
         state.busy = false;
         if (r && r.ok) {
           upsertCred({ oauth_file: r.oauth_file || "", username: u, password: p, name: n || r.name || "" });
-          // 桥端检测到重复账号 → 已合并更新，不新建
+          // 登录成功 → 立即关闭弹窗（智能体校验异步进行，不阻塞）
+          if (done) done();
           if (r.duplicate) {
             toast(true, (r.message) || "该账号已存在，已更新 ✅");
-            if (done) done();
             loadAll();
             return;
           }
           toast(true, "登录成功 ✅ 校验智能体同步中…");
-          verifyAgents(done, 6);
+          verifyAgents(null, 6);
         } else {
           toast(false, (r && r.error) || "登录失败（账号或密码错误）");
         }
