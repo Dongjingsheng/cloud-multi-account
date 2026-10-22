@@ -12,8 +12,22 @@ import threading
 import time
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
-LOG_FILE = os.path.join(TOOLS, 'logs', 'cloud_bridge.log')
+LOGS_DIR = os.path.join(TOOLS, 'logs')
+DATA_DIR = os.path.join(TOOLS, 'data')
+LOG_FILE = os.path.join(LOGS_DIR, 'cloud_bridge.log')
 PORT = 59000
+
+
+def _ensure_dirs():
+    """确保 logs/ 和 data/ 目录存在（插件目录被重建/重装后可能缺失，否则启动桥会静默失败）"""
+    try:
+        os.makedirs(LOGS_DIR, exist_ok=True)
+        os.makedirs(DATA_DIR, exist_ok=True)
+    except Exception:
+        pass
+
+
+_ensure_dirs()
 
 
 def _log(msg):
@@ -130,6 +144,15 @@ class CloudMultiAccountPlugin:
                     _log(f'看护检查异常: {e}')
 
         threading.Thread(target=_auto_start, daemon=True).start()
+        # 跟随 QwenPaw 关闭：注册关闭钩子杀桥（API 支持时；不支持则忽略）
+        try:
+            if hasattr(api, 'register_shutdown_hook'):
+                api.register_shutdown_hook(_kill_bridge)
+                _log('已注册关闭钩子：QwenPaw 退出时自动停止桥')
+            else:
+                _log('PluginApi 无 register_shutdown_hook，跳过关闭钩子（桥由进程终止时自然退出）')
+        except Exception as e:
+            _log(f'注册关闭钩子失败（忽略）: {e}')
         _log('纯 Go 插件已注册，3 秒后启动 Go 桥')
 
 
