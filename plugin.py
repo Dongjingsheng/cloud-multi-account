@@ -124,6 +124,19 @@ def _start_bridge():
         _log(f'Go 桥启动失败: {e}')
 
 
+def _qwenpaw_running():
+    """检测 QwenPaw Desktop 是否还在运行（Windows/Linux）。看护线程据此跟随 QwenPaw 退出。"""
+    try:
+        if os.name == 'nt':
+            r = subprocess.run('tasklist', capture_output=True, timeout=10,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
+            return (b'qwenpaw-desktop.exe' in r.stdout) or (b'qwenpaw-backend.exe' in r.stdout)
+        r = subprocess.run(['pgrep', '-f', 'qwenpaw'], capture_output=True, timeout=10)
+        return r.returncode == 0
+    except Exception:
+        return True  # 无法判断时保守不杀
+
+
 class CloudMultiAccountPlugin:
     def register(self, api):
         def _auto_start():
@@ -133,10 +146,14 @@ class CloudMultiAccountPlugin:
                 _log('纯 Go 插件自动启动完成')
             except Exception as e:
                 _log(f'插件启动异常: {e}')
-            # 持续看护
+            # 持续看护：掉线自动拉起 + QwenPaw 退出时跟随停止桥
             while True:
                 time.sleep(20)
                 try:
+                    if not _qwenpaw_running():
+                        _log('检测到 QwenPaw 已退出 → 停止桥（跟随关闭）')
+                        _kill_bridge()
+                        return
                     if not _is_port_alive():
                         _log('⚠️ 桥掉线/挂起检测 → 自动拉起')
                         _start_bridge()
@@ -144,15 +161,15 @@ class CloudMultiAccountPlugin:
                     _log(f'看护检查异常: {e}')
 
         threading.Thread(target=_auto_start, daemon=True).start()
-        # 跟随 QwenPaw 关闭：注册关闭钩子杀桥（API 支持时；不支持则忽略）
+        # 跟随 QwenPaw 关闭：注册关闭钩子杀桥（正确签名 register_shutdown_hook(hook_name, callback, priority)）
         try:
             if hasattr(api, 'register_shutdown_hook'):
-                api.register_shutdown_hook(_kill_bridge)
+                api.register_shutdown_hook('cloud_bridge_stop', _kill_bridge)
                 _log('已注册关闭钩子：QwenPaw 退出时自动停止桥')
             else:
-                _log('PluginApi 无 register_shutdown_hook，跳过关闭钩子（桥由进程终止时自然退出）')
+                _log('PluginApi 无 register_shutdown_hook，跳过关闭钩子（看护线程会兜底跟随退出）')
         except Exception as e:
-            _log(f'注册关闭钩子失败（忽略）: {e}')
+            _log(f'注册关闭钩子失败（忽略，看护线程兜底）: {e}')
         _log('纯 Go 插件已注册，3 秒后启动 Go 桥')
 
 
