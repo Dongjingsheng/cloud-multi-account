@@ -549,7 +549,82 @@ func (b *Bridge) handleInstances(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]interface{}{"instances": insts})
 }
 
-// probeMissingAppIDs 对 app_id 为空的账号，用其 access_token 探测平台实例并写回 oauth 文件。
+// accountPrefixMap 返回有实例账号的前缀映射（按 oauth 文件名排序）：
+// acct1- → 第一个有 app_id 的账号，acct2- → 第二个……（QwenPaw 主界面聚合智能体用）
+func (b *Bridge) accountPrefixMap() (map[string]string, []string) {
+	m := map[string]string{}
+	var order []string
+	insts := b.scanAccounts()
+	idx := 1
+	for _, inst := range insts {
+		if inst.AppID == "" {
+			continue
+		}
+		prefix := fmt.Sprintf("acct%d", idx)
+		m[prefix] = inst.OAuthFile
+		order = append(order, prefix)
+		idx++
+	}
+	return m, order
+}
+
+// agentsAllAccounts 聚合所有有实例账号的智能体（QwenPaw 主界面用）：id 加账号前缀、name 加账号标识。
+func (b *Bridge) agentsAllAccounts() ([]map[string]interface{}, error) {
+	acctMap, order := b.accountPrefixMap()
+	merged := []map[string]interface{}{}
+	for _, prefix := range order {
+		oauthFile := acctMap[prefix]
+		fp := filepath.Join(b.oauthDir, oauthFile)
+		om, ok := b.loadOAuthFile(fp)
+		if !ok {
+			continue
+		}
+		app, _ := firstString(om, "app_id", "appId")
+		at, _ := firstString(om, "access_token", "accessToken")
+		if app == "" || at == "" {
+			continue
+		}
+		base := "https://" + app + baseHostSuffix
+		req, err := http.NewRequest(http.MethodGet, base+"/api/agents", nil)
+		if err != nil {
+			continue
+		}
+		req.Header.Set("Authorization", "Bearer "+at)
+		req.Header.Set("X-Agent-Id", "default")
+		resp, err := b.client.Do(req)
+		if err != nil {
+			continue
+		}
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			continue
+		}
+		var v map[string]interface{}
+		if json.Unmarshal(respBody, &v) != nil {
+			continue
+		}
+		ags, _ := v["agents"].([]interface{})
+		acctName := strings.TrimPrefix(oauthFile, "cloud_oauth_")
+		acctName = strings.TrimSuffix(acctName, ".json")
+		for _, ag := range ags {
+			if am, ok := ag.(map[string]interface{}); ok {
+				aid, _ := am["id"].(string)
+				aname, _ := am["name"].(string)
+				if aid == "" {
+					aid = "default"
+				}
+				am["id"] = prefix + "-" + aid
+				if aname == "" {
+					aname = aid
+				}
+				am["name"] = fmt.Sprintf("[%s] %s", acctName, aname)
+				merged = append(merged, am)
+			}
+		}
+	}
+	return merged, nil
+}
 // 解决"平台已开通实例但 oauth 没记录 app_id"的场景——刷新面板即可自动补齐。
 func (b *Bridge) probeMissingAppIDs(insts []accountInfo) {
 	for i := range insts {
@@ -860,6 +935,24 @@ func (b *Bridge) proxy(w http.ResponseWriter, r *http.Request) {
 				oauthErr = ""
 			}
 		}
+	} else {
+		// QwenPaw 主界面：X-Agent-Id 带账号前缀（acct1-/acct2-…）时按前缀路由到对应账号
+		if xa := r.Header.Get("X-Agent-Id"); xa != "" {
+			acctMap, _ := b.accountPrefixMap()
+			for prefix, oauthFile := range acctMap {
+				if strings.HasPrefix(xa, prefix+"-") {
+					acctPath = filepath.Join(b.oauthDir, oauthFile)
+					if om, ok := b.loadOAuthFile(acctPath); ok {
+						acct = om
+						if app, _ := firstString(om, "app_id", "appId"); app != "" {
+							base = "https://" + app + baseHostSuffix
+							oauthErr = ""
+						}
+					}
+					break
+				}
+			}
+		}
 	}
 
 	// 读取并缓存请求体（401 重试需要重放）
@@ -882,6 +975,14 @@ func (b *Bridge) proxy(w http.ResponseWriter, r *http.Request) {
 	target := base + targetPath
 	if r.URL.RawQuery != "" {
 		target += "?" + stripCloudPrefixQuery(r.URL.RawQuery)
+	}
+
+	// 聚合智能体：无账号路由且请求 /api/agents → 返回所有账号的智能体（QwenPaw 主界面多账号展示）
+	if acct == nil && (targetPath == "/api/agents" || targetPath == "/agents") {
+		if ags, err := b.agentsAllAccounts(); err == nil {
+			writeJSON(w, map[string]interface{}{"agents": ags})
+			return
+		}
 	}
 
 	// 实时聊天是流式（HTTP/2 stream）：必须边收边发，不能 io.ReadAll 缓冲（否则前端拿不到实时片段、一直转圈）
@@ -943,6 +1044,10 @@ func (b *Bridge) proxyStream(w http.ResponseWriter, r *http.Request, target stri
 		}
 	}
 	if v := req.Header.Get("X-Agent-Id"); v != "" {
+		// 先剥账号前缀（acct1-/acct2-…），再剥 cloud- 前缀
+		if i := strings.Index(v, "-"); i > 0 && strings.HasPrefix(v[:i], "acct") {
+			v = v[i+1:]
+		}
 		req.Header.Set("X-Agent-Id", stripCloudPrefix(v))
 	}
 	req.Header.Del("Origin")
@@ -1030,8 +1135,11 @@ func (b *Bridge) forward(ctx context.Context, method, target string, body []byte
 			req.Header.Add(k, v)
 		}
 	}
-	// X-Agent-Id：剥 cloud- 前缀
+	// X-Agent-Id：先剥账号前缀（acct1-/acct2-…，QwenPaw 主界面聚合智能体路由），再剥 cloud- 前缀
 	if v := req.Header.Get("X-Agent-Id"); v != "" {
+		if i := strings.Index(v, "-"); i > 0 && strings.HasPrefix(v[:i], "acct") {
+			v = v[i+1:]
+		}
 		req.Header.Set("X-Agent-Id", stripCloudPrefix(v))
 	}
 	// 剥掉浏览器 Origin/Referer（云端网关对非云端 Origin 返回 403——这是智能体加载不出来的根因）
