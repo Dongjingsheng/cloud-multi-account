@@ -1,0 +1,20 @@
+# 账号数据 / 日志 / 缓存 —— 绝不上传
+data/
+logs/
+cache/
+
+# 二进制产物（由 build 脚本构建；发布包 dist/*.zip 已含双端二进制）
+bridge/cloud_bridge_win.exe
+bridge/cloud_bridge_linux
+bridge/*.exe
+
+# 系统/编辑器
+.DS_Store
+Thumbs.db
+*.log
+
+# Python 缓存 / 备份文件
+__pycache__/
+*.pyc
+*.bak*
+
