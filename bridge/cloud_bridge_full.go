@@ -94,9 +94,12 @@ func (c *lruCache) Get(key string) ([]byte, http.Header, bool) {
 	return e.body, e.header.Clone(), true
 }
 
-func (c *lruCache) Add(key string, body []byte, header http.Header) {
+func (c *lruCache) Add(key string, body []byte, header http.Header, ttl time.Duration) {
 	if len(body) == 0 {
 		return
+	}
+	if ttl <= 0 {
+		ttl = c.ttl
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -106,11 +109,11 @@ func (c *lruCache) Add(key string, body []byte, header http.Header) {
 		e.body = body
 		e.header = header.Clone()
 		e.size = int64(len(body))
-		e.expires = time.Now().Add(c.ttl)
+		e.expires = time.Now().Add(ttl)
 		c.size += e.size
 		c.ll.MoveToFront(el)
 	} else {
-		e := &cacheEntry{key: key, body: body, header: header.Clone(), size: int64(len(body)), expires: time.Now().Add(c.ttl)}
+		e := &cacheEntry{key: key, body: body, header: header.Clone(), size: int64(len(body)), expires: time.Now().Add(ttl)}
 		el := c.ll.PushFront(e)
 		c.items[key] = el
 		c.size += e.size
@@ -121,6 +124,20 @@ func (c *lruCache) Add(key string, body []byte, header http.Header) {
 			break
 		}
 		c.removeLocked(back)
+	}
+}
+
+// InvalidatePrefix 删除 key 以 prefix 开头的缓存条目（写操作后失效对应会话缓存）。
+func (c *lruCache) InvalidatePrefix(prefix string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k, el := range c.items {
+		if strings.HasPrefix(k, prefix) {
+			e := el.Value.(*cacheEntry)
+			c.ll.Remove(el)
+			delete(c.items, k)
+			c.size -= e.size
+		}
 	}
 }
 
@@ -795,6 +812,9 @@ func (b *Bridge) proxy(w http.ResponseWriter, r *http.Request) {
 
 // forward 发送一次转发；401 且 allowRetry 时刷新 token 后重试一次。
 func (b *Bridge) forward(ctx context.Context, method, target string, body []byte, srcHeader http.Header, allowRetry bool, retried int) (int, http.Header, []byte, error) {
+	b.mu.Lock()
+	base := b.baseURL
+	b.mu.Unlock()
 	req, err := http.NewRequestWithContext(ctx, method, target, bytes.NewReader(body))
 	if err != nil {
 		return 0, nil, nil, err
@@ -817,6 +837,14 @@ func (b *Bridge) forward(ctx context.Context, method, target string, body []byte
 	req.Header.Set("Authorization", "Bearer "+b.accessToken())
 
 	cacheKey := ""
+	// POST/写操作：失效对应会话详情缓存（历史消息缓存 24h，写完要能立刻看到新内容）
+	if method == http.MethodPost {
+		if strings.HasPrefix(target, base+"/api/chats/") {
+			b.cache.InvalidatePrefix(target)
+		} else if strings.HasPrefix(target, base+"/api/chats") {
+			b.cache.InvalidatePrefix(base + "/api/chats")
+		}
+	}
 	if method == http.MethodGet {
 		cacheKey = target
 		// 缓存 key 必须含 X-Agent-Id——不同智能体同路径请求会串缓存（历史对话串号根因）
@@ -849,7 +877,12 @@ func (b *Bridge) forward(ctx context.Context, method, target string, body []byte
 	}
 
 	if resp.StatusCode == http.StatusOK && method == http.MethodGet && cacheKey != "" {
-		b.cache.Add(cacheKey, respBody, hdr)
+		// 会话详情/历史消息基本不变 → 缓存 24h（避免每次请求云端 15-20s）；其余 30s
+		ttl := cacheTTL
+		if strings.HasPrefix(target, base+"/api/chats/") {
+			ttl = 24 * time.Hour
+		}
+		b.cache.Add(cacheKey, respBody, hdr, ttl)
 	}
 	return resp.StatusCode, hdr, respBody, nil
 }
