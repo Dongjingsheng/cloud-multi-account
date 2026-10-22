@@ -936,11 +936,15 @@ func (b *Bridge) proxy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else {
-		// QwenPaw 主界面：X-Agent-Id 带账号前缀（acct1-/acct2-…）时按前缀路由到对应账号
+		// QwenPaw 主界面：X-Agent-Id 带账号前缀（acct1-/acct2-… 或 cloud-acct1-…）时按前缀路由到对应账号
 		if xa := r.Header.Get("X-Agent-Id"); xa != "" {
+			xa2 := xa
+			if strings.HasPrefix(xa2, "cloud-") {
+				xa2 = xa2[len("cloud-"):]
+			}
 			acctMap, _ := b.accountPrefixMap()
 			for prefix, oauthFile := range acctMap {
-				if strings.HasPrefix(xa, prefix+"-") {
+				if strings.HasPrefix(xa2, prefix+"-") {
 					acctPath = filepath.Join(b.oauthDir, oauthFile)
 					if om, ok := b.loadOAuthFile(acctPath); ok {
 						acct = om
@@ -1044,11 +1048,8 @@ func (b *Bridge) proxyStream(w http.ResponseWriter, r *http.Request, target stri
 		}
 	}
 	if v := req.Header.Get("X-Agent-Id"); v != "" {
-		// 先剥账号前缀（acct1-/acct2-…），再剥 cloud- 前缀
-		if i := strings.Index(v, "-"); i > 0 && strings.HasPrefix(v[:i], "acct") {
-			v = v[i+1:]
-		}
-		req.Header.Set("X-Agent-Id", stripCloudPrefix(v))
+		// 连续剥离前缀（cloud- → acctN- → …），QwenPaw 会发 cloud-acct1-default
+		req.Header.Set("X-Agent-Id", stripAllAgentPrefix(v))
 	}
 	req.Header.Del("Origin")
 	req.Header.Del("Referer")
@@ -1135,12 +1136,9 @@ func (b *Bridge) forward(ctx context.Context, method, target string, body []byte
 			req.Header.Add(k, v)
 		}
 	}
-	// X-Agent-Id：先剥账号前缀（acct1-/acct2-…，QwenPaw 主界面聚合智能体路由），再剥 cloud- 前缀
+	// X-Agent-Id：连续剥离前缀（cloud- → acctN- → …），QwenPaw 主界面会发 cloud-acct1-default
 	if v := req.Header.Get("X-Agent-Id"); v != "" {
-		if i := strings.Index(v, "-"); i > 0 && strings.HasPrefix(v[:i], "acct") {
-			v = v[i+1:]
-		}
-		req.Header.Set("X-Agent-Id", stripCloudPrefix(v))
+		req.Header.Set("X-Agent-Id", stripAllAgentPrefix(v))
 	}
 	// 剥掉浏览器 Origin/Referer（云端网关对非云端 Origin 返回 403——这是智能体加载不出来的根因）
 	req.Header.Del("Origin")
@@ -1307,6 +1305,22 @@ func stripCloudPrefixPath(p string) string {
 	return strings.Join(segs, "/")
 }
 
+// stripAllAgentPrefix 连续剥离 agent id 前缀：QwenPaw 主界面会发 cloud-acct1-default
+//（cloud- + 账号前缀叠加），必须剥到真正的 agent id（default），否则云端报 not found。
+func stripAllAgentPrefix(id string) string {
+	for {
+		if strings.HasPrefix(id, "cloud-") {
+			id = id[len("cloud-"):]
+			continue
+		}
+		if i := strings.Index(id, "-"); i > 0 && strings.HasPrefix(id[:i], "acct") {
+			id = id[i+1:]
+			continue
+		}
+		return id
+	}
+}
+
 func stripCloudPrefixQuery(q string) string {
 	vals, err := url.ParseQuery(q)
 	if err != nil {
@@ -1316,7 +1330,7 @@ func stripCloudPrefixQuery(q string) string {
 	for _, key := range []string{"agent_id", "agentId"} {
 		if vs, ok := vals[key]; ok {
 			for i, v := range vs {
-				vs[i] = stripCloudPrefix(v)
+				vs[i] = stripAllAgentPrefix(v)
 			}
 			changed = true
 		}
