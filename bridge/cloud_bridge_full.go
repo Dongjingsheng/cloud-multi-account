@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -538,6 +539,18 @@ func (b *Bridge) handleImportLogin(w http.ResponseWriter, r *http.Request) {
 		appID = b.probeAppID(at) // 从 app/list 探测实例 id
 	}
 	name := sanitizeName(req.Name)
+	// acctLocal：去掉邮箱 @ 后缀（如 2817894809@qq.com -> 2817894809），兼容旧 oauth / 默认名
+	acctLocal := acct
+	if i := strings.IndexByte(acctLocal, '@'); i >= 0 {
+		acctLocal = acctLocal[:i]
+	}
+	// 用户没填账号名 → 默认用账号 @ 前部分（避免多个账号都叫 "1" 互相覆盖）
+	if req.Name == "" && (name == "" || name == "1") {
+		alt := sanitizeName(acctLocal)
+		if alt != "" && alt != "1" {
+			name = alt
+		}
+	}
 	oauth := map[string]interface{}{
 		"access_token":  at,
 		"refresh_token": rt,
@@ -545,15 +558,10 @@ func (b *Bridge) handleImportLogin(w http.ResponseWriter, r *http.Request) {
 		"name":          name,
 		"account":       acct, // 登录账号标识（邮箱/手机号），用于重复检测
 	}
-	// 重复检测：同账号（account）或同名（name）→ 覆盖已有 oauth 文件，不新建
-	// acctLocal：去掉邮箱 @ 后缀（如 2817894809@qq.com -> 2817894809），兼容旧 oauth（name 存的是账号本身）
-	acctLocal := acct
-	if i := strings.IndexByte(acctLocal, '@'); i >= 0 {
-		acctLocal = acctLocal[:i]
-	}
 	targetPath := filepath.Join(b.oauthDir, "cloud_oauth_"+name+".json")
 	duplicate := false
 	dupFile := ""
+	conflict := false // 同名但确认为不同账号 → 不覆盖，给新账号改名
 	if b.oauthDir != "" {
 		entries, err := os.ReadDir(b.oauthDir)
 		if err == nil {
@@ -572,15 +580,41 @@ func (b *Bridge) handleImportLogin(w http.ResponseWriter, r *http.Request) {
 				}
 				oa, _ := firstString(om, "account")
 				on, _ := firstString(om, "name")
-				// account 相同 → 同一云端账号；name 相同 或 旧 oauth 的 name 就是登录账号（含 @ 前部分）→ 同名/同账号
-				if (oa != "" && oa == acct) || (on != "" && (on == name || on == acct || on == acctLocal)) {
+				sameAcct := (oa != "" && oa == acct) || (on != "" && (on == acct || on == acctLocal))
+				if sameAcct {
+					// 同一云端账号 → 覆盖更新（合并），不新建
 					targetPath = fp
 					duplicate = true
 					dupFile = e.Name()
+					conflict = false
 					break
+				}
+				// 同名：旧 oauth 无 account（历史数据）→ 保守覆盖；有明确不同 account → 冲突改名，绝不覆盖别的账号
+				if on != "" && on == name {
+					if oa == "" {
+						targetPath = fp
+						duplicate = true
+						dupFile = e.Name()
+						conflict = false
+						break
+					}
+					conflict = true
 				}
 			}
 		}
+	}
+	// 同名但不同账号 → 新账号自动改名（如 xxx_2），保留原账号数据
+	if conflict && !duplicate {
+		base := name
+		for i := 2; i < 50; i++ {
+			cand := fmt.Sprintf("%s_%d", base, i)
+			if _, err := os.Stat(filepath.Join(b.oauthDir, "cloud_oauth_"+cand+".json")); os.IsNotExist(err) {
+				name = cand
+				oauth["name"] = cand
+				break
+			}
+		}
+		targetPath = filepath.Join(b.oauthDir, "cloud_oauth_"+name+".json")
 	}
 	out, _ := json.MarshalIndent(oauth, "", "  ")
 	if err := os.WriteFile(targetPath, out, 0o644); err != nil {
@@ -822,6 +856,23 @@ func (b *Bridge) forward(ctx context.Context, method, target string, body []byte
 
 // ---------- 工具函数 ----------
 
+// parentAlive 检测指定 PID 的进程是否存活（桥跟随父进程退出用）。
+func parentAlive(pid int) bool {
+	if pid <= 0 {
+		return true
+	}
+	if runtime.GOOS == "windows" {
+		out, err := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/NH").Output()
+		if err != nil {
+			return true // 无法查询时保守认为存活
+		}
+		return strings.Contains(string(out), fmt.Sprintf("%d", pid))
+	}
+	// Linux/macOS：/proc/<pid> 目录存在即存活（零外部依赖、零 syscall）
+	_, err := os.Stat(fmt.Sprintf("/proc/%d", pid))
+	return err == nil
+}
+
 func sanitizeName(s string) string {
 	var b strings.Builder
 	for _, c := range s {
@@ -1047,6 +1098,18 @@ func main() {
 	flag.Parse()
 
 	b := NewBridge(*oauthPath, *oauthDir)
+	// 跟随父进程退出：父进程（QwenPaw backend/启动器）消失后桥自动退出（15 秒检测），
+	// 解决 QwenPaw 强杀/崩溃时钩子不执行导致的桥孤儿残留——自退出无需任何权限。
+	parentPid := os.Getppid()
+	go func() {
+		for {
+			time.Sleep(15 * time.Second)
+			if !parentAlive(parentPid) {
+				log.Printf("[lifecycle] 父进程 %d 已退出，桥跟随退出", parentPid)
+				os.Exit(0)
+			}
+		}
+	}()
 	srv := &http.Server{Addr: *listen, Handler: b}
 
 	log.Printf("cloud_bridge %s listening on %s (oauth=%s)", version, *listen, *oauthPath)
