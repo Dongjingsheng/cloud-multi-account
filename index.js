@@ -7,6 +7,7 @@
 
   var PLUGIN_ID = "cloud-multi-account";
   var ROUTE_ID = PLUGIN_ID + ".settings";
+  var PLUGIN_VERSION = "1.7.5"; // 与 plugin.json 同步；打包/升级时记得一起改
   // 桥地址：本机面板（Desktop/WebView hostname=127.0.0.1/localhost）与云端实例面板（hostname=实例域名）统一动态取
   var BRIDGE_HOST = "127.0.0.1";
   try {
@@ -98,6 +99,7 @@
 .cm-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}\n\
 .cm-head .cm-logo{width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,#22d3ee23,#818cf829);border:1px solid rgba(148,163,184,.22);display:flex;align-items:center;justify-content:center;font-size:17px}\n\
 .cm-head h2{margin:0;font-size:16px;font-weight:600;letter-spacing:.2px}\n\
+  .cm-head .cm-ver{font-size:10px;color:#64748b;font-weight:400;background:rgba(148,163,184,.12);border:1px solid rgba(148,163,184,.15);border-radius:6px;padding:1px 6px;vertical-align:2px;margin-left:4px}\n\
 .cm-head .cm-sub{font-size:11.5px;color:#94a3b8;margin-top:2px}\n\
 .cm-spacer{flex:1}\n\
 .cm-btn{border:1px solid rgba(148,163,184,.25);background:rgba(148,163,184,.08);color:#e2e8f0;border-radius:10px;padding:7px 14px;font-size:12.5px;cursor:pointer;transition:all .2s ease;display:inline-flex;align-items:center;gap:6px}\n\
@@ -174,7 +176,7 @@
     p.innerHTML =
       '<div class="cm-head">' +
       '<div class="cm-logo">☁️</div>' +
-      '<div><h2>云端账号</h2><div class="cm-sub">账号密码登录 · 会话续期 · 失效自动重登</div></div>' +
+      '<div><h2>云端账号 <span class="cm-ver">v' + PLUGIN_VERSION + '</span></h2><div class="cm-sub">账号密码登录 · 会话续期 · 失效自动重登</div></div>' +
       '<div class="cm-spacer"></div>' +
       '<button class="cm-btn" id="' + PLUGIN_ID + '-refresh" title="刷新">⟳ 刷新</button>' +
       '<button class="cm-btn primary" id="' + PLUGIN_ID + '-add">＋ 添加账号</button>' +
