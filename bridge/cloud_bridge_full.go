@@ -377,6 +377,65 @@ func jwtRemainMin(tok string) float64 {
 	return float64(remain) / 60
 }
 
+// loadOAuthFile 读取指定 oauth JSON 文件（多账号路由用）。
+func (b *Bridge) loadOAuthFile(fp string) (map[string]interface{}, bool) {
+	data, err := os.ReadFile(fp)
+	if err != nil {
+		return nil, false
+	}
+	var m map[string]interface{}
+	if json.Unmarshal(data, &m) != nil {
+		return nil, false
+	}
+	return m, true
+}
+
+// refreshOAuthFile 用指定 oauth 的 refresh_token 刷新并写回该文件（多账号 401 自愈）。
+func (b *Bridge) refreshOAuthFile(om map[string]interface{}, fp string) bool {
+	rt, _ := firstString(om, "refresh_token", "refreshToken")
+	if rt == "" {
+		return false
+	}
+	body, _ := json.Marshal(map[string]string{"refreshToken": rt})
+	req, err := http.NewRequest(http.MethodPost, refreshEndpoint, bytes.NewReader(body))
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := b.client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	var m map[string]interface{}
+	if json.Unmarshal(respBody, &m) != nil {
+		return false
+	}
+	newAT, _ := firstString(m, "accessToken", "access_token")
+	newRT, _ := firstString(m, "refreshToken", "refresh_token")
+	if newAT == "" || newRT == "" {
+		if data, ok := m["data"].(map[string]interface{}); ok {
+			newAT, _ = firstString(data, "accessToken", "access_token")
+			newRT, _ = firstString(data, "refreshToken", "refresh_token")
+		}
+	}
+	if newAT == "" || newRT == "" {
+		return false
+	}
+	om["access_token"] = newAT
+	om["refresh_token"] = newRT
+	out, _ := json.MarshalIndent(om, "", "  ")
+	if os.WriteFile(fp, out, 0o644) != nil {
+		return false
+	}
+	log.Printf("[auth] 已刷新账号 oauth %s", filepath.Base(fp))
+	return true
+}
+
 // scanAccounts 列出 oauth-dir 下所有 cloud_oauth*.json 账号（不输出 token）。
 func (b *Bridge) scanAccounts() []accountInfo {
 	accounts := []accountInfo{}
@@ -485,7 +544,43 @@ func (b *Bridge) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (b *Bridge) handleInstances(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]interface{}{"instances": b.scanAccounts()})
+	insts := b.scanAccounts()
+	b.probeMissingAppIDs(insts) // 空 app_id 账号自动探测实例并写回 oauth（用户开通后刷新即显示）
+	writeJSON(w, map[string]interface{}{"instances": insts})
+}
+
+// probeMissingAppIDs 对 app_id 为空的账号，用其 access_token 探测平台实例并写回 oauth 文件。
+// 解决"平台已开通实例但 oauth 没记录 app_id"的场景——刷新面板即可自动补齐。
+func (b *Bridge) probeMissingAppIDs(insts []accountInfo) {
+	for i := range insts {
+		if insts[i].AppID != "" {
+			continue
+		}
+		fp := filepath.Join(b.oauthDir, insts[i].OAuthFile)
+		data, err := os.ReadFile(fp)
+		if err != nil {
+			continue
+		}
+		var om map[string]interface{}
+		if json.Unmarshal(data, &om) != nil {
+			continue
+		}
+		at, _ := firstString(om, "access_token", "accessToken")
+		if at == "" {
+			continue
+		}
+		app := b.probeAppID(at)
+		if app == "" {
+			continue
+		}
+		om["app_id"] = app
+		out, _ := json.MarshalIndent(om, "", "  ")
+		if os.WriteFile(fp, out, 0o644) == nil {
+			insts[i].AppID = app
+			insts[i].BaseURL = "https://" + app + baseHostSuffix
+			log.Printf("[import] 自动探测补齐 app_id for %s -> %s", insts[i].OAuthFile, app)
+		}
+	}
 }
 
 // handleImportLogin 账号密码登录平台，保存 oauth 到 tools/cloud_oauth_<name>.json。
@@ -753,6 +848,20 @@ func (b *Bridge) proxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 按账号路由：前端带 X-Account（oauth 文件名）时，用该账号的实例/凭证转发（多账号会话各自独立）
+	var acct map[string]interface{}
+	acctPath := ""
+	if acctName := r.Header.Get("X-Account"); acctName != "" {
+		acctPath = filepath.Join(b.oauthDir, acctName)
+		if om, ok := b.loadOAuthFile(acctPath); ok {
+			acct = om
+			if app, _ := firstString(om, "app_id", "appId"); app != "" {
+				base = "https://" + app + baseHostSuffix
+				oauthErr = ""
+			}
+		}
+	}
+
 	// 读取并缓存请求体（401 重试需要重放）
 	var reqBody []byte
 	if r.Body != nil {
@@ -777,12 +886,12 @@ func (b *Bridge) proxy(w http.ResponseWriter, r *http.Request) {
 
 	// 实时聊天是流式（HTTP/2 stream）：必须边收边发，不能 io.ReadAll 缓冲（否则前端拿不到实时片段、一直转圈）
 	if r.Method == http.MethodPost && (strings.HasPrefix(targetPath, "/api/console/chat") || strings.Contains(targetPath, "/stream")) {
-		b.proxyStream(w, r, target, reqBody, true)
+		b.proxyStream(w, r, target, reqBody, true, acct, acctPath)
 		return
 	}
 
 	start := time.Now()
-	status, respHeader, respBody, err := b.forward(r.Context(), r.Method, target, reqBody, r.Header, true, 0)
+	status, respHeader, respBody, err := b.forward(r.Context(), r.Method, target, reqBody, r.Header, true, 0, acct, acctPath)
 	dur := time.Since(start).Milliseconds()
 	if err != nil {
 		log.Printf("[proxy] %s %s -> ERR (%dms): %v", r.Method, targetPath, dur, err)
@@ -818,7 +927,8 @@ func (b *Bridge) proxy(w http.ResponseWriter, r *http.Request) {
 
 // proxyStream 流式转发（边收边发）：用于 /api/console/chat 实时聊天等 HTTP/2 stream/SSE 端点。
 // 与 forward 不同：不用 io.ReadAll 等全量，读一块写一块 + Flush，前端能实时收到文字。
-func (b *Bridge) proxyStream(w http.ResponseWriter, r *http.Request, target string, body []byte, allowRetry bool) {
+// acct/acctPath：按账号路由（X-Account 指定时非空）——用该账号的 access_token、401 刷新该账号。
+func (b *Bridge) proxyStream(w http.ResponseWriter, r *http.Request, target string, body []byte, allowRetry bool, acct map[string]interface{}, acctPath string) {
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, target, bytes.NewReader(body))
 	if err != nil {
 		http.Error(w, "stream request error: "+err.Error(), http.StatusBadGateway)
@@ -837,7 +947,14 @@ func (b *Bridge) proxyStream(w http.ResponseWriter, r *http.Request, target stri
 	}
 	req.Header.Del("Origin")
 	req.Header.Del("Referer")
-	req.Header.Set("Authorization", "Bearer "+b.accessToken())
+	// token：按账号路由时用该账号 access_token；否则用主 oauth token
+	token := b.accessToken()
+	if acct != nil {
+		if t, _ := firstString(acct, "access_token", "accessToken"); t != "" {
+			token = t
+		}
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := b.client.Do(req)
 	if err != nil {
@@ -847,11 +964,17 @@ func (b *Bridge) proxyStream(w http.ResponseWriter, r *http.Request, target stri
 	}
 	defer resp.Body.Close()
 
-	// 401/403 → 刷新 token 后重试一次（流式重放）
+	// 401/403 → 刷新 token 后重试一次（流式重放；按账号时刷新该账号）
 	if (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) && allowRetry {
 		resp.Body.Close()
-		if rerr := b.refreshToken(); rerr == nil {
-			b.proxyStream(w, r, target, body, false)
+		ok := false
+		if acct != nil && acctPath != "" {
+			ok = b.refreshOAuthFile(acct, acctPath)
+		} else {
+			ok = b.refreshToken() == nil
+		}
+		if ok {
+			b.proxyStream(w, r, target, body, false, acct, acctPath)
 			return
 		}
 		http.Error(w, "unauthorized", resp.StatusCode)
@@ -890,7 +1013,8 @@ func (b *Bridge) proxyStream(w http.ResponseWriter, r *http.Request, target stri
 }
 
 // forward 发送一次转发；401 且 allowRetry 时刷新 token 后重试一次。
-func (b *Bridge) forward(ctx context.Context, method, target string, body []byte, srcHeader http.Header, allowRetry bool, retried int) (int, http.Header, []byte, error) {
+// acct/acctPath：按账号路由（X-Account 指定时非空）——用该账号的 access_token 转发、401 刷新该账号。
+func (b *Bridge) forward(ctx context.Context, method, target string, body []byte, srcHeader http.Header, allowRetry bool, retried int, acct map[string]interface{}, acctPath string) (int, http.Header, []byte, error) {
 	b.mu.Lock()
 	base := b.baseURL
 	b.mu.Unlock()
@@ -913,7 +1037,14 @@ func (b *Bridge) forward(ctx context.Context, method, target string, body []byte
 	// 剥掉浏览器 Origin/Referer（云端网关对非云端 Origin 返回 403——这是智能体加载不出来的根因）
 	req.Header.Del("Origin")
 	req.Header.Del("Referer")
-	req.Header.Set("Authorization", "Bearer "+b.accessToken())
+	// token：按账号路由时用该账号 access_token；否则用主 oauth token
+	token := b.accessToken()
+	if acct != nil {
+		if t, _ := firstString(acct, "access_token", "accessToken"); t != "" {
+			token = t
+		}
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	cacheKey := ""
 	// POST/写操作：失效对应会话详情缓存（历史消息缓存 24h，写完要能立刻看到新内容）
@@ -948,11 +1079,16 @@ func (b *Bridge) forward(ctx context.Context, method, target string, body []byte
 
 	if (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) && allowRetry && retried == 0 {
 		log.Printf("[auth] %d on %s, refreshing token and retrying once", resp.StatusCode, target)
-		if rerr := b.refreshToken(); rerr != nil {
-			log.Printf("[auth] refresh failed: %v", rerr)
+		ok := false
+		if acct != nil && acctPath != "" {
+			ok = b.refreshOAuthFile(acct, acctPath)
 		} else {
-			return b.forward(ctx, method, target, body, srcHeader, false, retried+1)
+			ok = b.refreshToken() == nil
 		}
+		if ok {
+			return b.forward(ctx, method, target, body, srcHeader, false, retried+1, acct, acctPath)
+		}
+		log.Printf("[auth] refresh failed for %s", target)
 	}
 
 	if resp.StatusCode == http.StatusOK && method == http.MethodGet && cacheKey != "" {

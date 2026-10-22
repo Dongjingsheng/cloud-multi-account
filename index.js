@@ -7,7 +7,7 @@
 
   var PLUGIN_ID = "cloud-multi-account";
   var ROUTE_ID = PLUGIN_ID + ".settings";
-  var PLUGIN_VERSION = "1.7.8"; // 与 plugin.json 同步；打包/升级时记得一起改
+  var PLUGIN_VERSION = "1.7.9"; // 与 plugin.json 同步；打包/升级时记得一起改
   // 桥地址：本机面板（Desktop/WebView hostname=127.0.0.1/localhost）与云端实例面板（hostname=实例域名）统一动态取
   var BRIDGE_HOST = "127.0.0.1";
   try {
@@ -356,7 +356,7 @@
       return;
     }
     b.innerHTML = '<div style="color:#94a3b8;font-size:12px">加载智能体…</div>';
-    api("/api/agents")
+    api("/api/agents", { headers: { "X-Account": inst.oauth_file } })
       .then(function (r) {
         var agents = (r && r.agents && r.agents.filter(Boolean)) || [];
         if (!agents.length) agents = [{ id: "default", name: "default" }];
@@ -371,17 +371,19 @@
           on(btn, "click", function () {
             btns.forEach(function (x) { x.classList.remove("active"); });
             btn.classList.add("active");
-            loadAgentChats(btn.getAttribute("data-ag"), b.querySelector("#" + PLUGIN_ID + "-agbody"));
+            loadAgentChats(btn.getAttribute("data-ag"), b.querySelector("#" + PLUGIN_ID + "-agbody"), inst.oauth_file);
           });
         });
-        if (agents[0]) loadAgentChats(agents[0].id, b.querySelector("#" + PLUGIN_ID + "-agbody"));
+        if (agents[0]) loadAgentChats(agents[0].id, b.querySelector("#" + PLUGIN_ID + "-agbody"), inst.oauth_file);
       })
       .catch(function () { b.innerHTML = '<div class="cm-empty">加载失败（桥不可达）</div>'; });
   }
-  function loadAgentChats(agId, body) {
+  function loadAgentChats(agId, body, acctFile) {
     if (!body) return;
     body.innerHTML = '<div style="color:#94a3b8;font-size:12px">加载会话…</div>';
-    api("/api/chats?archived=false&include_app_owned=false", { headers: { "X-Agent-Id": "cloud-" + agId } })
+    var hdrs = { "X-Agent-Id": "cloud-" + agId };
+    if (acctFile) hdrs["X-Account"] = acctFile; // 按账号路由：会话属于当前账号，不串号
+    api("/api/chats?archived=false&include_app_owned=false", { headers: hdrs })
       .then(function (r) {
         var chats = (r && (r.chats || r.data)) || (Array.isArray(r) ? r : []);
         if (!chats.length) { body.innerHTML = '<div class="cm-empty">暂无会话</div>'; return; }
