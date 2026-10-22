@@ -1,7 +1,7 @@
 {
   "id": "cloud-multi-account",
   "name": "云端多账号",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "type": "frontend",
   "description": "云端 QwenPaw 多账号一体化插件（纯 Go 双端）：账号密码登录、token 自动续期、失效自动重登、多智能体会话查看、实例管理一体化。内置毫秒级 Go 桥代理（Windows/Linux 自动识别）+ 掉线自动看护 + 403/401 自愈，面板玻璃质感。\nEnglish\nAll-in-one cloud multi-account plugin for QwenPaw (pure Go, Windows & Linux): account-password login, auto token renewal, auto re-login on expiry, multi-agent conversation browsing, and instance management. Built-in millisecond Go bridge proxy (auto-detects Windows/Linux) with auto-restart watchdog and 401/403 self-healing, glossy glass UI.\n日本語\nQwenPaw のクラウド複数アカウント一括プラグイン（純 Go・Windows/Linux 対応）：アカウント・パスワードログイン、トークン自動更新、有効期限切れ時の自動再ログイン、複数エージェントの会話閲覧、インスタンス管理を一体化。ミリ秒起動の Go ブリッジプロキシ（Windows/Linux 自動判別）と自動復旧ウォッチドッグ、401/403 自己修復を内蔵、ガラス質感の UI。\nTiếng Việt\nPlugin đa tài khoản đám mây toàn diện cho QwenPaw (thuần Go, Windows/Linux): đăng nhập bằng tài khoản-mật khẩu, tự động gia hạn token, tự động đăng nhập lại khi hết hạn, xem hội thoại nhiều agent và quản lý phiên bản. Tích hợp proxy cầu nối Go khởi động mili giây (tự nhận diện Windows/Linux) với cơ chế tự phục hồi 401/403 và giao diện kính mờ.",
   "author": "User",
