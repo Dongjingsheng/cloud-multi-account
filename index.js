@@ -175,8 +175,9 @@
       '<div class="cm-grid" id="' + PLUGIN_ID + '-grid"></div>' +
       '<div id="' + PLUGIN_ID + '-detail" style="max-height:65vh;overflow-y:auto"></div>';
     document.querySelector("#" + ROUTE_ID + ", .qwenpaw-page") ? 0 : 0;
-    on(document.getElementById(PLUGIN_ID + "-refresh"), "click", function () { loadAll(); toast(true, "正在刷新…"); });
-    on(document.getElementById(PLUGIN_ID + "-add"), "click", function () { openLoginModal(); });
+    // 注意：面板 p 尚未挂载进 document，必须用 p.querySelector（document.getElementById 会拿到 null 导致绑定失败）
+    on(p.querySelector("#" + PLUGIN_ID + "-refresh"), "click", function () { loadAll(); toast(true, "正在刷新…"); });
+    on(p.querySelector("#" + PLUGIN_ID + "-add"), "click", function () { openLoginModal(); });
     on(p, "click", function (e) { if (state.menuOpen && !e.target.closest(".cm-menu")) state.menuOpen = null; });
     // 挂载到插件页面容器（与旧版一致，不清空宿主）
     var pageContainer = document.querySelector('[id$="-page"]') || document.body;
