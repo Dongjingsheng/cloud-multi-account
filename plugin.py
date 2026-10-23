@@ -10,6 +10,7 @@ import os
 import subprocess
 import threading
 import time
+import io
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 LOGS_DIR = os.path.join(TOOLS, 'logs')
@@ -126,6 +127,79 @@ def _start_bridge():
         _log(f'Go 桥启动失败: {e}')
 
 
+# 记忆实时同步守护（跟随 QwenPaw 生命周期：与桥同规则——启动拉起/掉线自愈/退出跟随）
+# 注意：用 python.exe + CREATE_NO_WINDOW（pythonw 无 stdout 会导致守护异常退出）
+MEMORY_LIVE_PY = r'C:\Users\74-D\.qwenpaw\workspaces\default\tools\memory_live.py'
+MEMORY_LIVE_PYEXE = r'D:\soft\Python310\python.exe'
+ML_PID_FILE = os.path.join(DATA_DIR, '_memory_live.pid')
+
+
+def _memory_live_running():
+    """检查 PID 文件记录的 memory_live 守护进程是否存活（精确，避免误判反复杀启）"""
+    try:
+        if not os.path.exists(ML_PID_FILE):
+            return False
+        pid = int(io.open(ML_PID_FILE, encoding='utf-8').read().strip())
+        if os.name == 'nt':
+            r = subprocess.run(f'tasklist /FI "PID eq {pid}"', shell=True, capture_output=True, timeout=10,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
+            txt = r.stdout.decode('gbk', errors='ignore')
+            return f'{pid}' in txt and 'python' in txt
+        try:
+            os.kill(pid, 0)
+            return True
+        except Exception:
+            return False
+    except Exception:
+        return False
+
+
+def _start_memory_live():
+    """启动记忆同步守护（python 无窗口）；已存活则不重复启动；启动后写 PID 文件"""
+    try:
+        if _memory_live_running():
+            return
+        p = subprocess.Popen([MEMORY_LIVE_PYEXE, MEMORY_LIVE_PY, 'start'],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             creationflags=subprocess.CREATE_NO_WINDOW)
+        time.sleep(1)
+        if p.pid and p.poll() is None:
+            try:
+                io.open(ML_PID_FILE, 'w', encoding='utf-8').write(str(p.pid))
+            except Exception:
+                pass
+            _log(f'memory_live 已启动（PID {p.pid}，python 无窗口）')
+        else:
+            _log('memory_live 启动后立即退出（异常）')
+    except Exception as e:
+        _log(f'memory_live 启动失败: {e}')
+
+
+def _kill_memory_live():
+    """停止记忆同步守护（按 PID 文件 + 命令行兜底）"""
+    try:
+        if os.path.exists(ML_PID_FILE):
+            try:
+                pid = int(io.open(ML_PID_FILE, encoding='utf-8').read().strip())
+                subprocess.run(f'taskkill /F /PID {pid}', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+        if os.name == 'nt':
+            ps = ("Get-CimInstance Win32_Process -Filter \"Name='python.exe' or Name='pythonw.exe'\" | "
+                  "Where-Object { $_.CommandLine -like '*memory_live.py start*' } | "
+                  "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }")
+            subprocess.run(['powershell', '-Command', ps], shell=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+        else:
+            subprocess.run(['pkill', '-f', 'memory_live.py'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            os.remove(ML_PID_FILE)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
 def _qwenpaw_running():
     """检测 QwenPaw Desktop 是否还在运行（Windows/Linux）。看护线程据此跟随 QwenPaw 退出。"""
     try:
@@ -145,34 +219,42 @@ class CloudMultiAccountPlugin:
             time.sleep(3)
             try:
                 _start_bridge()
-                _log('纯 Go 插件自动启动完成')
+                _start_memory_live()
+                _log('纯 Go 插件自动启动完成（桥 + 记忆同步）')
             except Exception as e:
                 _log(f'插件启动异常: {e}')
-            # 持续看护：掉线自动拉起 + QwenPaw 退出时跟随停止桥
+            # 持续看护：掉线自动拉起 + QwenPaw 退出时跟随停止
             while True:
                 time.sleep(20)
                 try:
                     if not _qwenpaw_running():
-                        _log('检测到 QwenPaw 已退出 → 停止桥（跟随关闭）')
+                        _log('检测到 QwenPaw 已退出 → 停止桥和记忆同步（跟随关闭）')
                         _kill_bridge()
+                        _kill_memory_live()
                         return
                     if not _is_port_alive():
                         _log('⚠️ 桥掉线/挂起检测 → 自动拉起')
                         _start_bridge()
+                    if not _memory_live_running():
+                        _log('⚠️ 记忆同步守护掉线 → 自动拉起')
+                        _start_memory_live()
                 except Exception as e:
                     _log(f'看护检查异常: {e}')
 
         threading.Thread(target=_auto_start, daemon=True).start()
-        # 跟随 QwenPaw 关闭：注册关闭钩子杀桥（正确签名 register_shutdown_hook(hook_name, callback, priority)）
+        # 跟随 QwenPaw 关闭：注册关闭钩子（正确签名 register_shutdown_hook(hook_name, callback, priority)）
         try:
             if hasattr(api, 'register_shutdown_hook'):
-                api.register_shutdown_hook('cloud_bridge_stop', _kill_bridge)
-                _log('已注册关闭钩子：QwenPaw 退出时自动停止桥')
+                def _stop_all():
+                    _kill_bridge()
+                    _kill_memory_live()
+                api.register_shutdown_hook('cloud_bridge_stop', _stop_all)
+                _log('已注册关闭钩子：QwenPaw 退出时自动停止桥和记忆同步')
             else:
                 _log('PluginApi 无 register_shutdown_hook，跳过关闭钩子（看护线程会兜底跟随退出）')
         except Exception as e:
             _log(f'注册关闭钩子失败（忽略，看护线程兜底）: {e}')
-        _log('纯 Go 插件已注册，3 秒后启动 Go 桥')
+        _log('纯 Go 插件已注册，3 秒后启动 Go 桥 + 记忆同步')
 
 
 plugin = CloudMultiAccountPlugin()
