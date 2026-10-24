@@ -1170,7 +1170,7 @@ func (b *Bridge) forward(ctx context.Context, method, target string, body []byte
 		if cached, hdr, ok := b.cache.Get(cacheKey); ok {
 			return http.StatusOK, hdr, cached, nil
 		}
-		if method == http.MethodGet && strings.HasPrefix(targetPath, "/api/agents") {
+		if method == http.MethodGet && strings.Contains(target, "/api/agents") {
 			log.Printf("[cache-miss] key=%s target=%s base=%s", cacheKey, target, base)
 		}
 	}
@@ -1215,6 +1215,76 @@ func (b *Bridge) forward(ctx context.Context, method, target string, body []byte
 
 // ruleText 云端 agent 协作规则（记忆快照协作——新增 agent 自动补齐）
 const ruleText = "协作规则：1) 云端 memory/ 目录包含本地 QwenPaw 推来的【记忆快照】（约 20-40 秒更新），用户提到本地记录、之前的对话、偏好时，先查 memory/ 里的最新内容。2) 你无法主动访问本地，只能通过 memory/ 快照了解本地。3) 回答中涉及本地信息时注明『根据云端记忆快照』。"
+
+// heartbeatKeepAlive 对所有账号调平台 heartbeat（保持实例活跃，尽力防止被回收）
+func (b *Bridge) heartbeatKeepAlive() {
+	insts := b.scanAccounts()
+	for _, inst := range insts {
+		if inst.AppID == "" {
+			continue
+		}
+		fp := filepath.Join(b.oauthDir, inst.OAuthFile)
+		om, ok := b.loadOAuthFile(fp)
+		if !ok {
+			continue
+		}
+		at, _ := firstString(om, "access_token", "accessToken")
+		if at == "" {
+			continue
+		}
+		if !b.heartbeatOne(inst.AppID, at) {
+			// token 失效 → 刷新该账号 oauth 后重试一次
+			if b.refreshOAuthFile(om, fp) {
+				if at2, _ := firstString(om, "access_token", "accessToken"); at2 != "" {
+					b.heartbeatOne(inst.AppID, at2)
+				}
+			}
+		}
+	}
+}
+
+func (b *Bridge) heartbeatOne(appID, at string) bool {
+	body, _ := json.Marshal(map[string]string{"appId": appID})
+	req, _ := http.NewRequest(http.MethodPost, "https://platform.agentscope.io/api/v1/app/heartbeat", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+at)
+	resp, err := b.client.Do(req)
+	if err != nil {
+		log.Printf("[heartbeat] %s 请求失败: %v", appID[:12], err)
+		return false
+	}
+	defer resp.Body.Close()
+	rb, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode == http.StatusOK {
+		log.Printf("[heartbeat] %s 保活 OK", appID[:12])
+		return true
+	}
+	log.Printf("[heartbeat] %s 状态 %d: %s", appID[:12], resp.StatusCode, strings.TrimSpace(string(rb[:min(len(rb), 120)])))
+	return false
+}
+
+// cleanupLogs 清理超过 7 天的日志（只保留最近 7 天）
+func (b *Bridge) cleanupLogs() {
+	logDir := filepath.Join(b.oauthDir, "..", "logs")
+	entries, err := os.ReadDir(logDir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-7 * 24 * time.Hour)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".log") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			os.Remove(filepath.Join(logDir, e.Name()))
+			log.Printf("[logs] 已清理超过 7 天的日志: %s", e.Name())
+		}
+	}
+}
 
 // prefetchAll 预取所有账号的智能体/会话缓存（后台每 60 秒执行；新增智能体及时出现）
 func (b *Bridge) prefetchAll() {
@@ -1621,6 +1691,21 @@ func main() {
 		for {
 			b.prefetchAll()
 			time.Sleep(60 * time.Second)
+		}
+	}()
+	// 心跳保活：每 5 分钟对所有账号调平台 heartbeat（保持实例活跃，尽力防止被平台回收）
+	go func() {
+		for {
+			b.heartbeatKeepAlive()
+			time.Sleep(5 * time.Minute)
+		}
+	}()
+	// 日志清理：启动时 + 每天清理超过 7 天的日志（只保留 7 天）
+	go func() {
+		b.cleanupLogs()
+		for {
+			time.Sleep(24 * time.Hour)
+			b.cleanupLogs()
 		}
 	}()
 	srv := &http.Server{Addr: *listen, Handler: b}
