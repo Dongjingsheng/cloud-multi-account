@@ -1170,6 +1170,9 @@ func (b *Bridge) forward(ctx context.Context, method, target string, body []byte
 		if cached, hdr, ok := b.cache.Get(cacheKey); ok {
 			return http.StatusOK, hdr, cached, nil
 		}
+		if method == http.MethodGet && strings.HasPrefix(targetPath, "/api/agents") {
+			log.Printf("[cache-miss] key=%s target=%s base=%s", cacheKey, target, base)
+		}
 	}
 
 	resp, err := b.client.Do(req)
@@ -1209,6 +1212,139 @@ func (b *Bridge) forward(ctx context.Context, method, target string, body []byte
 }
 
 // ---------- 工具函数 ----------
+
+// ruleText 云端 agent 协作规则（记忆快照协作——新增 agent 自动补齐）
+const ruleText = "协作规则：1) 云端 memory/ 目录包含本地 QwenPaw 推来的【记忆快照】（约 20-40 秒更新），用户提到本地记录、之前的对话、偏好时，先查 memory/ 里的最新内容。2) 你无法主动访问本地，只能通过 memory/ 快照了解本地。3) 回答中涉及本地信息时注明『根据云端记忆快照』。"
+
+// prefetchAll 预取所有账号的智能体/会话缓存（后台每 60 秒执行；新增智能体及时出现）
+func (b *Bridge) prefetchAll() {
+	insts := b.scanAccounts()
+	log.Printf("[prefetch] 开始预取 %d 个账号", len(insts))
+	for _, inst := range insts {
+		if inst.AppID == "" {
+			continue
+		}
+		fp := filepath.Join(b.oauthDir, inst.OAuthFile)
+		om, ok := b.loadOAuthFile(fp)
+		if !ok {
+			log.Printf("[prefetch] %s 读 oauth 失败", inst.OAuthFile)
+			continue
+		}
+		at, _ := firstString(om, "access_token", "accessToken")
+		app, _ := firstString(om, "app_id", "appId")
+		if at == "" || app == "" {
+			log.Printf("[prefetch] %s 缺 token/app", inst.OAuthFile)
+			continue
+		}
+		base := "https://" + app + baseHostSuffix
+		go b.prefetchAgents(inst.OAuthFile, base, at)
+		go b.prefetchChats(inst.OAuthFile, base, at)
+	}
+}
+
+func (b *Bridge) prefetchAgents(oauthFile, base, at string) {
+	req, _ := http.NewRequest(http.MethodGet, base+"/api/agents", nil)
+	req.Header.Set("Authorization", "Bearer "+at)
+	req.Header.Set("X-Agent-Id", "default")
+	resp, err := b.client.Do(req)
+	if err != nil {
+		log.Printf("[prefetch] %s agents 请求失败: %v", oauthFile, err)
+		return
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		resp.Body.Close()
+		log.Printf("[prefetch] %s agents 401/403 → 刷新重试", oauthFile)
+		// 账号 token 过期 → 刷新该账号 oauth 后重试一次
+		fp := filepath.Join(b.oauthDir, oauthFile)
+		om, ok := b.loadOAuthFile(fp)
+		if ok && b.refreshOAuthFile(om, fp) {
+			if at2, _ := firstString(om, "access_token", "accessToken"); at2 != "" {
+				b.prefetchAgents(oauthFile, base, at2)
+			}
+		}
+		return
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	hdr := resp.Header.Clone()
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("[prefetch] %s agents 状态 %d", oauthFile, resp.StatusCode)
+		return
+	}
+	b.cache.Add(base+"/api/agents|agent=cloud-default", body, hdr, 90*time.Second)
+	log.Printf("[prefetch] agents %s 缓存写入 %dB", oauthFile, len(body))
+	// 规则自愈：检查每个 agent description 是否含协作规则，缺则自动 PUT 补
+	b.selfHealAgentRules(oauthFile, base, at, body)
+}
+
+// selfHealAgentRules 检查 agent description 缺协作规则 → 自动 PUT 补（新增 agent 自动获得规则）
+func (b *Bridge) selfHealAgentRules(oauthFile, base, at string, agentsBody []byte) {
+	var v map[string]interface{}
+	if json.Unmarshal(agentsBody, &v) != nil {
+		return
+	}
+	ags, _ := v["agents"].([]interface{})
+	for _, ag := range ags {
+		am, ok := ag.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		desc, _ := am["description"].(string)
+		if strings.Contains(desc, "协作规则") {
+			continue
+		}
+		aid, _ := am["id"].(string)
+		if aid == "" {
+			continue
+		}
+		body := map[string]interface{}{}
+		for k, vv := range am {
+			body[k] = vv
+		}
+		body["description"] = desc + "\n" + ruleText
+		bb, _ := json.Marshal(body)
+		req, _ := http.NewRequest(http.MethodPut, base+"/api/agents/"+url.PathEscape(aid), bytes.NewReader(bb))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+at)
+		req.Header.Set("X-Agent-Id", "default")
+		if r2, err := b.client.Do(req); err == nil {
+			io.Copy(io.Discard, io.LimitReader(r2.Body, 1<<20))
+			r2.Body.Close()
+			log.Printf("[heal] 已为 %s 的 agent %s 补协作规则（%d）", oauthFile, aid, r2.StatusCode)
+		}
+	}
+}
+
+func (b *Bridge) prefetchChats(oauthFile, base, at string) {
+	for _, ag := range []string{"default", "QwenPaw_QA_Agent_0.2"} {
+		u := base + "/api/chats?archived=false&include_app_owned=false"
+		req, _ := http.NewRequest(http.MethodGet, u, nil)
+		req.Header.Set("Authorization", "Bearer "+at)
+		req.Header.Set("X-Agent-Id", ag)
+		resp, err := b.client.Do(req)
+		if err != nil {
+			continue
+		}
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			resp.Body.Close()
+			fp := filepath.Join(b.oauthDir, oauthFile)
+			om, ok := b.loadOAuthFile(fp)
+			if ok && b.refreshOAuthFile(om, fp) {
+				if at2, _ := firstString(om, "access_token", "accessToken"); at2 != "" {
+					b.prefetchChats(oauthFile, base, at2)
+				}
+			}
+			return
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+		hdr := resp.Header.Clone()
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			continue
+		}
+		b.cache.Add(u+"|agent=cloud-"+ag, body, hdr, 90*time.Second)
+	}
+}
 
 // parentAlive 检测指定 PID 的进程是否存活（桥跟随父进程退出用）。
 func parentAlive(pid int) bool {
@@ -1478,6 +1614,13 @@ func main() {
 				log.Printf("[lifecycle] 父进程 %d 已退出，桥跟随退出", parentPid)
 				os.Exit(0)
 			}
+		}
+	}()
+	// 后台预取：每 60 秒刷新所有账号的智能体/会话缓存 + 规则自愈（新增智能体及时出现、前端秒拿）
+	go func() {
+		for {
+			b.prefetchAll()
+			time.Sleep(60 * time.Second)
 		}
 	}()
 	srv := &http.Server{Addr: *listen, Handler: b}

@@ -7,7 +7,7 @@
 
   var PLUGIN_ID = "cloud-multi-account";
   var ROUTE_ID = PLUGIN_ID + ".settings";
-  var PLUGIN_VERSION = "1.8.1"; // 与 plugin.json 同步；打包/升级时记得一起改
+  var PLUGIN_VERSION = "1.8.2"; // 与 plugin.json 同步；打包/升级时记得一起改
   // 桥地址：本机面板（Desktop/WebView hostname=127.0.0.1/localhost）与云端实例面板（hostname=实例域名）统一动态取
   var BRIDGE_HOST = "127.0.0.1";
   try {
@@ -192,6 +192,10 @@
     // 挂载到插件页面容器（与旧版一致，不清空宿主）
     var pageContainer = document.querySelector('[id$="-page"]') || document.body;
     pageContainer.appendChild(p);
+    // 自动刷新：每 60 秒自动拉最新（新增智能体/会话及时出现，无需手动点刷新）
+    setInterval(function () {
+      if (state.loaded && !state.busy) loadAll();
+    }, 60000);
     return p;
   }
 
