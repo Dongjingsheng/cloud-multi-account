@@ -340,6 +340,17 @@
     });
     renderDetailSessions(inst);
   }
+  function hbStatus(inst) {
+    var now = Date.now() / 1000;
+    if (!inst.heartbeat_last) return '<span style="color:#94a3b8">⚪ 待保活（启动后 5 分钟内心跳）</span>';
+    var minsAgo = Math.round((now - inst.heartbeat_last) / 60);
+    var nextIn = inst.heartbeat_next ? Math.max(0, Math.round((inst.heartbeat_next - now) / 60)) : null;
+    var txt = '上次 ' + minsAgo + ' 分钟前' + (nextIn != null ? ' · 下次 ' + nextIn + ' 分钟后' : '');
+    if (inst.heartbeat_ok && minsAgo <= 10) return '<span style="color:#4ade80">🟢 保活正常</span>（' + txt + '）';
+    if (minsAgo > 10 || !inst.heartbeat_ok) return '<span style="color:#f87171">🔴 保活异常</span>（' + txt + '）';
+    return '<span style="color:#fbbf24">🟡 待确认</span>（' + txt + '）';
+  }
+
   function renderDetailInfo(inst) {
     var b = document.getElementById(PLUGIN_ID + "-detail-body");
     if (!b) return;
@@ -349,6 +360,7 @@
       '<div>app_id：<code style="font-size:11px">' + esc(inst.app_id || "未开通实例（登录平台后开通 QwenPaw 实例）") + '</code></div>' +
       '<div>状态：' + cardBadge(inst) + '</div>' +
       '<div>token 剩余：<b>' + fmtMin(inst.token_remain_min) + '</b></div>' +
+      '<div>心跳保活：' + hbStatus(inst) + '</div>' +
       '</div>';
   }
   function renderDetailSessions(inst) {
