@@ -16,7 +16,7 @@
       BRIDGE_HOST = hn;
     }
   } catch (e) {}
-  var BRIDGE = "http://" + BRIDGE_HOST + ":59000";
+  var BRIDGE = "http://" + BRIDGE_HOST + ":63000";
   var CREDS_KEY = "cloudMaCredsList";
   var refreshTimer = null;
   var TOKEN_FULL_MIN = 120; // access_token 全量有效期（分钟），用于进度条
@@ -563,7 +563,7 @@
       renderOverview();
       var g = document.getElementById(PLUGIN_ID + "-grid");
       if (g) g.innerHTML = '<div class="cm-card cm-glass" style="grid-column:1/-1;border-color:rgba(248,113,113,.3)">' +
-        '<div class="cm-empty">🔌 云端桥不可达（127.0.0.1:59000）<br><br>' +
+        '<div class="cm-empty">🔌 云端桥不可达（127.0.0.1:63000）<br><br>' +
         '<button class="cm-btn" id="' + PLUGIN_ID + '-retry">⟳ 重试</button></div></div>';
       var rb = document.getElementById(PLUGIN_ID + "-retry");
       if (rb) on(rb, "click", function () { state.loading = true; loadAll(); toast(true, "重试中…"); });

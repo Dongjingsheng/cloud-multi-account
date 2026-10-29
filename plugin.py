@@ -16,7 +16,7 @@ TOOLS = os.path.dirname(os.path.abspath(__file__))
 LOGS_DIR = os.path.join(TOOLS, 'logs')
 DATA_DIR = os.path.join(TOOLS, 'data')
 LOG_FILE = os.path.join(LOGS_DIR, 'cloud_bridge.log')
-PORT = 59000
+PORT = 63000
 # 桥监听地址：0.0.0.0 = 本机 + 远程都可访问（云端实例经域名访问面板时需要）；可用环境变量覆盖
 LISTEN = os.environ.get('CLOUD_BRIDGE_LISTEN', f'0.0.0.0:{PORT}')
 

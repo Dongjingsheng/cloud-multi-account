@@ -1,7 +1,7 @@
 // cloud_bridge.go — QwenPaw 云端实例本地代理桥（Go 版）
 //
 // 功能：
-//   - 本地 HTTP 代理，默认监听 :59000
+//   - 本地 HTTP 代理，默认监听 :63000
 //   - 转发请求到云端实例 API：base_url = https://<app_id>.qwenpaw.platform.agentscope.io
 //     （app_id 来自 oauth JSON 文件）
 //   - 认证：Authorization: Bearer <access_token>；收到 401 时用 refresh_token
@@ -12,7 +12,7 @@
 //   - JSON 响应原样透传；GET 200 响应做简单 LRU 内存缓存（默认上限 200MB、TTL 30s）
 //   - 额外端点：/__bridge_status（uptime/mem/账号列表/缓存统计）、/__instances（实例列表）
 //
-// 用法：cloud_bridge_linux [-listen :59000] [-oauth tools/cloud_oauth.json] [-oauth-dir tools]
+// 用法：cloud_bridge_linux [-listen :63000] [-oauth tools/cloud_oauth.json] [-oauth-dir tools]
 package main
 
 import (
@@ -1668,7 +1668,7 @@ refresh();setInterval(refresh,15000);
 </html>`
 
 func main() {
-	listen := flag.String("listen", ":59000", "local listen address")
+	listen := flag.String("listen", ":63000", "local listen address")
 	oauthPath := flag.String("oauth", "tools/cloud_oauth.json", "oauth JSON file with access_token/refresh_token/app_id")
 	oauthDir := flag.String("oauth-dir", "tools", "directory to scan for cloud_oauth*.json (accounts list)")
 	flag.Parse()
